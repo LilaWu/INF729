@@ -56,7 +56,7 @@ object Preprocessor {
       .read
       .option("header", true) // utilise la première ligne du (des) fichier(s) comme header
       .option("inferSchema", "true") // pour inférer le type de chaque colonne (Int, String, etc.)
-      .csv("/Users/didi/Documents/Telecom/INF729/Spark/train_clean.csv")
+      .csv("src/main/resources/train/train_clean.csv")
 
     val dfCasted: DataFrame = df
       .withColumn("goal", $"goal".cast("Int"))
