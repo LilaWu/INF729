@@ -1,0 +1,190 @@
+package paristech
+
+import org.apache.spark.SparkConf
+import org.apache.spark.ml.classification.LogisticRegression
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.feature.RegexTokenizer
+import org.apache.spark.ml.feature.StopWordsRemover
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
+import org.apache.spark.ml.feature.CountVectorizer
+import org.apache.spark.ml.feature.StringIndexer
+import org.apache.spark.ml.feature.OneHotEncoderEstimator
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.{Pipeline}
+import org.apache.spark.ml.tuning.{ParamGridBuilder, TrainValidationSplit}
+import org.apache.spark.sql.{DataFrame, SparkSession}
+
+object Trainer {
+
+  def main(args: Array[String]): Unit = {
+
+    val conf = new SparkConf().setAll(Map(
+      "spark.scheduler.mode" -> "FIFO",
+      "spark.speculation" -> "false",
+      "spark.reducer.maxSizeInFlight" -> "48m",
+      "spark.serializer" -> "org.apache.spark.serializer.KryoSerializer",
+      "spark.kryoserializer.buffer.max" -> "1g",
+      "spark.shuffle.file.buffer" -> "32k",
+      "spark.default.parallelism" -> "12",
+      "spark.sql.shuffle.partitions" -> "12",
+      "spark.driver.maxResultSize" -> "2g"
+    ))
+
+    val spark = SparkSession
+      .builder
+      .config(conf)
+      .appName("TP Spark : Trainer")
+      .getOrCreate()
+
+    /*******************************************************************************
+      *
+      *       TP 3
+      *
+      *       - lire le fichier sauvegarder précédemment
+      *       - construire les Stages du pipeline, puis les assembler
+      *       - trouver les meilleurs hyperparamètres pour l'entraînement du pipeline avec une grid-search
+      *       - Sauvegarder le pipeline entraîné
+      *
+      *       if problems with unimported modules => sbt plugins update
+      *
+      ********************************************************************************/
+
+
+   val df = spark.read.load("src/main/resources/preprocessed")
+    //df.show(100)
+
+    //Stage1: récupérer les mots des textes
+    val tokenizer = new RegexTokenizer()
+      .setPattern("\\W+")
+      .setGaps(true)
+      .setInputCol("text") //input is a ligne of words
+      .setOutputCol("tokens") //output is a list of seperated words
+
+    //val regexTokenized = tokenizer.transform(df)
+
+    //Stage 2 : retirer les stop words
+    val remover = new StopWordsRemover()
+      .setInputCol("tokens")
+      .setOutputCol("removed") //output is a list of seperated words without propositions etc...
+
+    //val stopremoved = remover.transform(regexTokenized)
+
+    //Stage 3 : computer la partie TF
+    val vectorizer = new CountVectorizer()
+      .setInputCol("removed")
+      .setOutputCol("vector") //output is a array of a int and two vectors of index and frequency of words
+      .setVocabSize(100)
+      .setMinDF(2)
+
+    //val vectorized = vectorizer.fit(stopremoved).transform(stopremoved)
+
+    //Stage 4 : computer la partie IDF
+    val idf = new IDF()
+      .setInputCol("vector")
+      .setOutputCol("tfidf") //output is the tfidf of vector
+
+    //val idfModel = idf.fit(vectorized).transform(vectorized)
+
+    //Stage 5 : convertir country2 en quantités numériques
+    val indexercountry = new StringIndexer()
+      .setInputCol("country2")
+      .setOutputCol("country_indexed") //output gives country a index
+
+    //val countryindexed = indexercountry.fit(idfed).transform(idfed)
+
+    //Stage 6 : convertir currency2 en quantités numériques
+    val indexercurrency = new StringIndexer()
+      .setInputCol("currency2")
+      .setOutputCol("currency_indexed") //output gives currency a index
+
+    //val currencyindexed = indexercurrency.fit(countryindexed).transform(countryindexed)
+
+    //Stages 7 et 8: One-Hot encoder ces deux catégories
+    val encoder = new OneHotEncoderEstimator()
+      .setInputCols(Array("country_indexed", "currency_indexed"))
+      .setOutputCols(Array("country_onehot", "currency_onehot")) //output convert into onehout vectors
+
+    //val encoded = encoder.fit(currencyindexed).transform(currencyindexed)
+
+    //Stage 9 : assembler tous les features en un unique vecteur
+    val assembler = new VectorAssembler()
+      .setInputCols(Array("tfidf", "days_campaign", "hours_prepa", "goal", "country_onehot", "currency_onehot"))
+      .setOutputCol("features")
+
+    //Stage 10 : créer/instancier le modèle de classification
+    val lr = new LogisticRegression()
+      .setElasticNetParam(0.0)
+      .setFitIntercept(true)
+      .setFeaturesCol("features")
+      .setLabelCol("final_status")
+      .setStandardization(true)
+      .setPredictionCol("predictions")
+      .setRawPredictionCol("raw_predictions")
+      .setThresholds(Array(0.7, 0.3))
+      .setTol(1.0e-6)
+      .setMaxIter(20)
+
+    //Stage 11: création du Pipeline
+    val pipeline = new Pipeline()
+      .setStages(Array(tokenizer,remover,vectorizer,idf,indexercountry,indexercurrency,encoder, assembler,lr))
+
+    //Stage 12: split des données en training et test sets
+    val Array(train, test) = df.randomSplit(Array(0.9, 0.1), seed = 12345)
+
+    //Stage 13: entraînement du modèle
+    val model = pipeline.fit(train)
+
+    //Stage 14: Test du modèle
+    val dfWithSimplePredictions = model.transform(test)
+
+    dfWithSimplePredictions.groupBy("final_status", "predictions").count.show()
+
+    val evalution = new MulticlassClassificationEvaluator()
+      .setLabelCol("final_status")
+      .setMetricName("f1")
+      .setPredictionCol("predictions")
+
+    //Stage 15: réglage des hyper-paramètres (a.k.a. tuning) du modèle - Grid search
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(lr.regParam, Array(10e-8, 10e-6, 10e-4, 10e-2))
+      .addGrid(vectorizer.minDF,Array(55.0,75.0,95.0))
+      .build()
+
+    val trainValidationSplit = new TrainValidationSplit()
+      .setEstimator(pipeline)
+      .setEvaluator(evalution)
+      .setEstimatorParamMaps(paramGrid)
+      .setTrainRatio(0.7)
+      .setParallelism(2)
+
+    val model_grid = trainValidationSplit.fit(train)
+
+    //Stage 16: réglage des hyper-paramètres (a.k.a. tuning) du modèle - Test du modèle
+    val dfWithGridPredictions = model_grid.transform(test)
+
+    println("Le f1 score pour le test WithSimplePredictions est: ", evalution.evaluate(dfWithSimplePredictions))
+    println("Le f1 score pour le test WithGridPredictions est:", evalution.evaluate(dfWithGridPredictions))
+    println("Nous pouvons apercevoir que le score du test WithGridPredictions est mieux que le score du test WithSimplePredictions. Maintenant on va voir si le score du test WithGridPredictions atteind sa maximum, on va ajouter plus de parametres: ")
+
+    val paramGrid2 = new ParamGridBuilder()
+      .addGrid(lr.regParam, Array(10e-8, 10e-7, 10e-6, 10e-5, 10e-4, 10e-3, 10e-2))
+      .addGrid(vectorizer.minDF,Array(55.0,60.0,70.0,75.0,80.0,85.0,90.0,95.0))
+      .build()
+
+    val trainValidationSplit2 = new TrainValidationSplit()
+      .setEstimator(pipeline)
+      .setEvaluator(evalution)
+      .setEstimatorParamMaps(paramGrid2)
+      .setTrainRatio(0.7)
+      .setParallelism(2)
+
+    val model_grid2 = trainValidationSplit2.fit(train)
+
+    val dfWithGridPredictions2 = model_grid2.transform(test)
+
+    println("Le f1 score pour le test WithSimplePredictions est: ", evalution.evaluate(dfWithSimplePredictions))
+    println("Le f1 score pour le test WithGridPredictions est:", evalution.evaluate(dfWithGridPredictions))
+    println("Nous pouvons apercevoir que le score pour le test WithGridPredictions est toujours pareil. Cela vaut dire que la modele atteind tres probablement la meilleure performance sur les paramtres précédents.")
+
+  }
+}
