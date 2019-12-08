@@ -89,6 +89,7 @@ object Trainer {
     val indexercountry = new StringIndexer()
       .setInputCol("country2")
       .setOutputCol("country_indexed") //output gives country a index
+      .setHandleInvalid("keep")
 
     //val countryindexed = indexercountry.fit(idfed).transform(idfed)
 
@@ -96,6 +97,7 @@ object Trainer {
     val indexercurrency = new StringIndexer()
       .setInputCol("currency2")
       .setOutputCol("currency_indexed") //output gives currency a index
+      .setHandleInvalid("keep")
 
     //val currencyindexed = indexercurrency.fit(countryindexed).transform(countryindexed)
 
